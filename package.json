@@ -1,10 +1,28 @@
 {
   "name": "create-specflow",
   "version": "0.1.0",
-  "description": "Spec-driven, parallel SDLC for a small team of GitHub Copilot agents",
+  "description": "Spec-driven software factory: Claude Code and GitHub Copilot CLI agents on one machine, in tmux",
   "type": "module",
   "repository": "github:KKogaa/specflow",
-  "bin": { "create-specflow": "bin/create.mjs" },
-  "files": [".github/", ".vscode/", "docs/", "openspec/", "scripts/", "bin/", ".env.example", ".gitattributes", ".gitignore", "AGENTS.md", "README.md"],
-  "engines": { "node": ">=18" }
+  "bin": {
+    "create-specflow": "bin/create.mjs"
+  },
+  "files": [
+    ".claude/",
+    ".github/",
+    "docs/",
+    "openspec/",
+    "scripts/",
+    "bin/",
+    ".editorconfig",
+    ".env.example",
+    ".gitattributes",
+    ".gitignore",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  }
 }

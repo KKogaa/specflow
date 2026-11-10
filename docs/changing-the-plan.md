@@ -1,8 +1,8 @@
 # Changing the plan mid-project
 
-Scope changes all day. You change it by **talking to the orchestrator** while the workers keep building. The orchestrator's Copilot CLI session is the conductor's control seat (see [setup/conductor.md](setup/conductor.md#4-start-the-orchestrator)).
+Scope changes all day. You change it by **talking to the orchestrator** while the workers keep building. The orchestrator's tmux window (`orch`) is your control seat (see [setup/running.md](setup/running.md#2-start-the-team)).
 
-**To interrupt it:** press **Esc** in Copilot CLI (or the stop button in VS Code), type your request, and it goes back to its loop when it's done. Nothing pauses: assignments live in GitHub, so workers carry on.
+**To interrupt it:** press **Esc** in its window (Claude Code or Copilot CLI), type your request, and it goes back to its loop when it's done. Nothing pauses: assignments live in GitHub, so workers carry on.
 
 | You say | What happens |
 |---------|--------------|
@@ -13,12 +13,12 @@ Scope changes all day. You change it by **talking to the orchestrator** while th
 | *"Pause"* / *"resume"* | It stops or restarts assigning work. Workers finish their current unit and then wait |
 | *"What's happening?"* | A 5-line status |
 
-**Teammates** can file ideas without interrupting anyone: the **Feature request** issue template on GitHub. Workers never pick these up. The orchestrator lists them as *waiting to be planned*, and you say *"plan #42"* when you want it in.
+**Anyone** (you included, from your phone) can file ideas without interrupting the orchestrator: the **Feature request** issue template on GitHub. Workers never pick these up. The orchestrator lists them as *waiting to be planned*, and you say *"plan #42"* when you want it in.
 
 ```mermaid
 flowchart LR
     you(["You, in the orchestrator session<br/>'add feature: …'"]) --> plan["plan-feature<br/>questions · in-flight check<br/>OpenSpec change on a branch"]
-    req(["Teammate<br/>Feature request issue"]) -. "'plan #42'" .-> plan
+    req(["Anyone<br/>Feature request issue"]) -. "'plan #42'" .-> plan
     plan --> ok{{"Summary + Contracts + issues<br/>'ship it?'"}}
     ok -- yes --> pr["spec PR · pr:needs-review"]
     pr --> rev["worker on another account<br/>validates + merges"]

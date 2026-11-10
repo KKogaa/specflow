@@ -1,32 +1,30 @@
-# Machine setup
+# Setup
 
-Every machine on the team runs **Windows**. Pick your profile, follow its page top to bottom, and you're done.
+Specflow runs on **one machine** (Linux, macOS or WSL): one orchestrator and any number of workers, each a Claude Code or Copilot CLI session in its own tmux window and git worktree. Follow these pages in order.
 
-| Profile | Who | How many | Guide | Time |
-|---|---|---|---|---|
-| **Every machine** | everyone, first | 6 | [windows-base.md](windows-base.md) | ~10 min |
-| **Repo owner** | whoever owns the project repo (usually the conductor). Adds the kit to it with one `npx` command, with no cloning of the kit | 1, once per team | [repo.md](repo.md) | ~5 min |
-| **Conductor** | the team lead: plans, runs the orchestrator, builds `scaffold` | 1 | [conductor.md](conductor.md) | ~10 min |
-| **Worker** | everyone else (the conductor can add one too) | 5+ | [worker.md](worker.md) | ~5 min |
+| Step | Page | Time |
+|---|---|---|
+| 1. Install the tools and sign in | [machine.md](machine.md) | ~10 min |
+| 2. Add the kit to your project, protect `main` | [repo.md](repo.md) | ~5 min |
+| 3. Kick off, build `scaffold`, start the team | [running.md](running.md) | ~45 min, mostly kickoff and scaffold |
 
-## The 6-machine demo layout
+## The default layout
 
-| Machine | Profile | Runs | Lane |
+```
+node scripts/orchestrate.mjs team up --claude 2 --copilot 2
+```
+
+| tmux window | Folder | Runs | Lane |
 |---|---|---|---|
-| 1 | Conductor | the **orchestrator** (Copilot CLI) in the repo folder, plus, once `scaffold` merges, a worker in a second folder (`worktree`) | `backend` |
-| 2 | Worker | 1 worker | `frontend` |
-| 3 | Worker | 1 worker | `frontend` |
-| 4 | Worker | 1 worker | `frontend` |
-| 5 | Worker | 1 worker | `backend` |
-| 6 | Worker | 1 worker | `backend` |
+| `orch` | the repo (main checkout) | the **orchestrator** agent (`--orchestrator claude` by default) | – |
+| `board` | the repo | `orchestrate.mjs status`, refreshed every 30 s | – |
+| `claude-1` | `../<repo>-claude-1` | a worker (Claude Code) | `frontend` |
+| `claude-2` | `../<repo>-claude-2` | a worker (Claude Code) | `backend` |
+| `copilot-1` | `../<repo>-copilot-1` | a worker (Copilot CLI) | `frontend` |
+| `copilot-2` | `../<repo>-copilot-2` | a worker (Copilot CLI) | `backend` |
 
-Lanes are only preferences: an idle worker helps any lane. To add workers later, run a second one on any machine that can take it ([worker.md → More than one worker on a machine](worker.md#more-than-one-worker-on-a-machine)). **Exactly one orchestrator** runs, on machine 1.
+Lanes alternate over the workers (`--lanes` changes the cycle), and they're only preferences: an idle worker helps any lane. Add a worker later with `team add <claude|copilot> --lane <lane>`. **Exactly one orchestrator** runs.
 
-## Order on the day
-
-1. Everyone: [windows-base.md](windows-base.md), in parallel.
-2. Repo owner: [repo.md](repo.md). It adds the kit to your project and pushes it. Everyone else waits for the repo link, then just clones the project.
-3. Conductor: [conductor.md](conductor.md), which covers kickoff, starting the orchestrator, and building `scaffold`.
-4. Workers: [worker.md](worker.md). Start as soon as the orchestrator is running. Workers sit idle until `scaffold` merges.
+How many workers? Each one is a full agent session: it uses CPU and RAM for builds and tests, and its CLI's rate limits. Two to four is a good start; add more when the backlog has many ready issues and the machine stays responsive.
 
 After setup: [playbook.md](../playbook.md) for the day itself, and [changing-the-plan.md](../changing-the-plan.md) for adding features, bugs and priority changes mid-project.

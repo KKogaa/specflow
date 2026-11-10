@@ -8,8 +8,8 @@ import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const KIT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-// The installer itself is not part of the kit, and README.md is the kit's own: the project gets its own from kickoff.
-const SKIP = new Set(['bin', 'node_modules', '.git', 'package.json', 'package-lock.json', 'README.md']);
+// The installer itself is not part of the kit, and README.md and plans/ are the kit's own: the project gets its own README from kickoff.
+const SKIP = new Set(['bin', 'node_modules', '.git', 'package.json', 'package-lock.json', 'README.md', 'plans']);
 
 const args = process.argv.slice(2);
 if (args.includes('-h') || args.includes('--help')) {
@@ -72,8 +72,8 @@ if (counts.skipped && !force) console.log('Re-run with --force to overwrite the 
 if (dryRun) process.exit(0);
 
 // Files the kit can't work without. If the project already had its own, say so: the owner must merge them by hand.
-const CORE = ['AGENTS.md', '.github/copilot-instructions.md', '.vscode/settings.json', 'openspec/config.yaml', 'scripts/orchestrate.mjs'];
-const clashes = skipped.filter((f) => CORE.includes(f) || f.startsWith('.github/agents/') || f.startsWith('.github/skills/'));
+const CORE = ['AGENTS.md', 'CLAUDE.md', '.github/copilot-instructions.md', '.claude/settings.json', 'openspec/config.yaml', 'scripts/orchestrate.mjs'];
+const clashes = skipped.filter((f) => CORE.includes(f) || f.startsWith('.claude/agents/') || f.startsWith('.claude/skills/') || f.startsWith('.claude/commands/'));
 if (clashes.length) {
   console.log(`\nThese existed already and were kept, but the kit relies on its own version. Merge them by hand, or re-run with --force:\n${clashes.map((f) => `  ${f}`).join('\n')}`);
 }
@@ -91,10 +91,10 @@ const steps = [
   !hasGit && 'git init -b main',
   'git add -A',
   'git commit -m "chore: add specflow"',
-  remote ? 'git push          # before protecting main; teammates get the kit by cloning this repo' : 'gh repo create <org>/<project> --private --source . --push',
+  remote ? 'git push          # before protecting main' : 'gh repo create <org>/<project> --private --source . --push',
   'node scripts/orchestrate.mjs setup',
 ].filter(Boolean);
 console.log(`
-Next steps (one command at a time):
+Next steps:
 ${steps.map((x) => `  ${x}`).join('\n')}
-Then follow docs/setup/repo.md (collaborators, protect main), and share docs/setup/README.md with the team.`);
+Then follow docs/setup/repo.md (protect main), set up the machine (docs/setup/machine.md), and start with docs/setup/running.md.`);

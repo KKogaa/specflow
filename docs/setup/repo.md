@@ -1,10 +1,10 @@
 # Repo owner: add the kit to your project (once)
 
-One person does this, usually the conductor, after [windows-base.md](windows-base.md). It takes about 5 minutes. **Nobody clones the kit's repository.** The kit is installed into your own project with one `npx` command, and teammates get it by cloning your project.
+Once per project, after [machine.md](machine.md). About 5 minutes. **You don't clone the kit's repository:** it's installed into your own project with one `npx` command.
 
 ## 1. Add the kit to your project
 
-**Typical case: you already created the project repo yourself** (empty, or from any template or stack), on GitHub. In PowerShell:
+**Typical case: you already created the project repo yourself** (empty, or from any template or stack), on GitHub:
 ```
 gh repo clone <org>/<project>
 cd <project>
@@ -12,10 +12,10 @@ npx -y github:KKogaa/specflow
 ```
 `npx` downloads the kit straight from GitHub and copies it into the current folder:
 - **It never overwrites your files.** Anything that already exists is kept and listed as `skip`, and the kit's lines are appended to your `.gitignore`. Your `README.md` and `package.json` stay yours, because the kit's are never copied.
-- If one of the files the kit relies on already existed (for example `AGENTS.md` or `.vscode/settings.json`), it tells you so. Merge it by hand, or re-run with `--force`.
+- If one of the files the kit relies on already existed (for example `AGENTS.md` or `.claude/settings.json`), it tells you so. Merge it by hand, or re-run with `--force`.
 - Add `--dry-run` to preview without writing anything.
 
-Then commit and push the kit **before protecting `main`**. The installer prints these exact commands; run them one at a time:
+Then commit and push the kit **before protecting `main`**. The installer prints these exact commands:
 ```
 git add -A
 git commit -m "chore: add specflow"
@@ -24,17 +24,15 @@ git push
 
 **No repo yet?** Either create one from the kit's template, `gh repo create <org>/<project> --template KKogaa/specflow --private --clone`, or make an empty folder and run the same `npx` command in it. The installer then prints the `git init` and `gh repo create` steps.
 
-**Pin the kit version** so the whole team uses one: `npx -y github:KKogaa/specflow#<tag or commit>`.
+**Pin the kit version**, so a re-install gives the same files: `npx -y github:KKogaa/specflow#<tag or commit>`.
 
-## 2. Add the team
+## 2. A second account (optional)
 
-*Settings → Collaborators* → add every teammate with **Write** access. Each worker acts as its teammate's account, so every account needs write access: workers label issues, and approve and merge each other's PRs.
-
-Teammates other than you work from **forks** of the repo ([worker.md](worker.md#1-get-the-repo)), so their branches don't pile up in it. For a private repo, turn on *Settings → General → Allow forking* (in an organization, the organization must allow forking private repositories too). You don't need a fork: your own sessions, however many, work in the repo itself.
+If you set one up ([machine.md, step 4](machine.md#4-optional-a-second-github-account)), add it under *Settings → Collaborators* with **Write** access: its workers label issues, and approve and merge PRs.
 
 ## 3. Labels, the worker registry and the project board
 
-Do this on the account that will run the orchestrator (normally the conductor's). The board is a GitHub Project, so that account needs the `project` scope once:
+Do this on the account that runs the orchestrator (your own, normally). The board is a GitHub Project, so that account needs the `project` scope once:
 ```
 gh auth refresh -s project
 ```
@@ -51,17 +49,25 @@ Every issue lands on the board, whoever created it, and its card moves on its ow
 
 ## 4. Protect `main`
 
-*Settings → Branches → Add rule* for `main`:
-- **Require a pull request before merging**, with **1 approval**
-- **No** required status checks. There is no CI server: the `check` skill runs the checks locally.
+*Settings → Branches → Add rule* for `main`. Pick the rule that matches your accounts:
+
+| | One account (default) | Two accounts |
+|---|---|---|
+| **Require a pull request before merging** | on, **0 approvals** | on, **1 approval** |
+| Who approves | nobody: workers post comment reviews, and `reviewed --merge` only merges what a green `check` passed on | the other account's worker |
+| Spec PRs you merge yourself | allowed | needs the other account's approval (a worker gives it), or merge as an admin |
+
+For both:
+- **No** required status checks. There is no CI server: `check` runs the checks locally and the script records them.
+- **Block force pushes** on.
 - Leave **"Dismiss stale approvals"** and **"Require approval of the most recent reviewable push"** **off**. A reviewer may push a small fix to a PR and then approve it, and those settings would block that.
 
 Then *Settings → General*:
 - **Allow squash merging** on, the other merge types off
 - **Automatically delete head branches** on
 
-Workers approve each other's PRs under their own accounts, and the orchestrator never gives a worker a PR opened by its own account. So the 1-approval rule never needs a human click.
+With two accounts, the orchestrator only gives a PR to a worker on the other account, so the 1-approval rule never needs a human click. With one, it gives it to any worker other than the one that opened it.
 
-## 5. Share the link
+## 5. Next
 
-Post the repo URL in the team chat. Teammates continue with [worker.md](worker.md), and the conductor with [conductor.md](conductor.md).
+Start the team: [running.md](running.md).
