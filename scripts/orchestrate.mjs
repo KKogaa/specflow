@@ -1,13 +1,18 @@
 #!/usr/bin/env node
 // Coordinates one orchestrator and any number of workers through GitHub, with no server and no
-// GitHub Actions. Pure Node plus `gh` and `git`, so it runs the same in PowerShell, CMD or Git Bash.
+// GitHub Actions. Pure Node plus `gh`, `git` and (for `team`) `tmux`, on Linux, macOS or WSL.
 //
 // Who writes what (every piece of state has exactly one writer, so nothing can race):
-//   - The ORCHESTRATOR (exactly one, normally a Copilot CLI session running the `orchestrator`
-//     agent) creates issues from OpenSpec, unblocks, archives, and assigns work.
-//   - Each WORKER (any number, several per machine via git worktrees) keeps one heartbeat comment
+//   - The ORCHESTRATOR (exactly one: a Claude Code or Copilot CLI session running the `orchestrator`
+//     agent, in the `orch` tmux window) creates issues from OpenSpec, unblocks, archives, and assigns work.
+//   - Each WORKER (any number, each in its own git worktree and tmux window) keeps one heartbeat comment
 //     on the "worker registry" issue and reads its assignment from the orchestrator's comment there.
 //
+// The team (one machine, tmux):
+//   node scripts/orchestrate.mjs team up [--claude <n>] [--copilot <n>] [--orchestrator claude|copilot] [--lanes frontend,backend] [--auto-only]
+//       Worktrees + a tmux session: window `orch` (the orchestrator), `board` (status), one window per worker. Safe to repeat.
+//   node scripts/orchestrate.mjs team add <claude|copilot> [--lane <area>] [--auto-only]   One more worker window
+//   node scripts/orchestrate.mjs team status | down        The session's windows | stop it (worktrees and branches stay)
 // Orchestrator:
 //   node scripts/orchestrate.mjs setup [--project <number>]   Labels, the worker registry issue and the project board (once per repo)
 //   node scripts/orchestrate.mjs tick [--watch <minutes>]  Housekeeping + assign work. --watch repeats every 30s
@@ -30,15 +35,19 @@
 //   node scripts/orchestrate.mjs park <issue> --body-file <file>   Ask a human: comment, label status:needs-decision, unassign
 //   node scripts/orchestrate.mjs review-start <pr>         Check out the PR merged with main, for `check`
 //   node scripts/orchestrate.mjs reviewed <pr> --merge|--changes --body-file <file>
-//       Posts the review (approve / request changes) and merges or hands back. A PR can be sent back only ONCE.
+//       Posts the review and merges or hands back. A PR can be sent back only ONCE. The review is an approval or a
+//       change request when the PR's author is another GitHub account, and a comment review when it's this account
+//       (GitHub doesn't allow approving your own PR).
 //       --merge needs a green `check` of the review-start commit, and refuses if the PR or main moved since.
 // Anyone:
-//   node scripts/orchestrate.mjs status
+//   node scripts/orchestrate.mjs status [--every <seconds>]
 //   node scripts/orchestrate.mjs sync|unblock|archive|housekeeping [--dry-run] [--local]
 //       Issues are made from the OpenSpec changes merged on main. `sync --dry-run --local` previews
 //       the changes in this folder instead (e.g. a feature you're planning, before its spec PR merges).
 //
 // A worker's id defaults to "<gh login>/<folder name>", so each worktree is its own worker.
+// Reviews: when workers on two or more GitHub accounts are live, a PR is reviewed from another account (a real
+// approval). With one account, any other worker reviews it (a comment review), and the green `check` gates the merge.
 //
 // Forks: a teammate who isn't the repo's owner works in a fork, made with `gh repo fork <owner>/<repo> --clone`
 // (so `origin` is their fork and `upstream` the team's repo). Then issues, PRs and main come from `upstream`,
@@ -46,11 +55,12 @@
 // (the owner, with as many sessions as they like) everything is `origin`.
 
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 
 const args = process.argv.slice(2);
-const VALUE_OPTS = new Set(["--lane", "--wait", "--watch", "--worker", "--body-file", "--title", "--project"]);
+const VALUE_OPTS = new Set(["--lane", "--wait", "--watch", "--worker", "--body-file", "--title", "--project",
+  "--claude", "--copilot", "--orchestrator", "--lanes", "--every"]);
 const flag = (name) => args.includes(`--${name}`);
 const opt = (name, dflt) => {
   const i = args.indexOf(`--${name}`);
@@ -71,7 +81,7 @@ const HANDOFF_MS = 5 * 60_000; // an implement unit reported done, but no open P
 const MAX_FAILURES = 2; // a unit that failed this many times goes to a human
 const STATE_DIR = ".orchestrate"; // gitignored, per worktree (.git is a file in a worktree): body files and check results
 const PRIORITY = { "priority:p0": 0, "priority:p1": 1, "priority:p2": 2 };
-// Lanes are the `area:` labels. Each maps to the specialist agent (.github/agents/<role>.agent.md) that does the work.
+// Lanes are the `area:` labels. Each maps to the specialist agent (.claude/agents/<role>.md) that does the work.
 // Anything without an area (bugs, chores, archive issues) goes to the backend specialist.
 const ROLES = { "area:frontend": "frontend", "area:backend": "backend" };
 const LANES = ["frontend", "backend", "any"];
@@ -102,7 +112,7 @@ function write(desc, ghArgs, input) {
   log(`${DRY ? "[dry-run] " : ""}${desc}`);
   if (!DRY) return gh(ghArgs, input);
 }
-// Blocks without spawning `sleep`, which doesn't exist when node runs from PowerShell on Windows.
+// Blocks the process without a child process or a timer loop.
 const sleep = (s) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, s * 1000);
 const minutes = (ms) => Math.round(ms / 60_000);
 
@@ -205,10 +215,15 @@ function loadPRs() {
       labels: p.labels.map((l) => l.name),
       worker: p.body?.match(prWorkerRe)?.[1],
       // How many times reviewers sent it back: 0 = first review, 1+ = second look (no more send-backs).
-      rounds: (p.reviews ?? []).filter((r) => r.state === "CHANGES_REQUESTED").length,
+      rounds: sendBacks(p.reviews),
       updated: Date.parse(p.updatedAt),
     }));
 }
+
+// A send-back is a change request, or (same account, where GitHub allows no change request) a comment review
+// carrying the marker `reviewed --changes` adds.
+const CHANGES_MARK = "<!-- specflow:changes -->";
+const sendBacks = (reviews = []) => reviews.filter((r) => r.state === "CHANGES_REQUESTED" || r.body?.includes(CHANGES_MARK)).length;
 
 // The open PR for an issue: its branch is <N>-<slug>, or its body closes #N.
 const prForIssue = (prs, n) => prs.find((p) => p.headRefName?.startsWith(`${n}-`) ||
@@ -270,7 +285,8 @@ function heartbeat(reg, comments, patch) {
   const id = myId();
   const mine = comments.find((c) => c.kind === "worker" && c.data.id === id && c.login === me());
   const data = { lane: "any", autoOnly: false, ...mine?.data, ...patch, id };
-  const body = `<!-- worker ${JSON.stringify(data)} -->\n**${id}** · lane \`${data.lane}\`${data.autoOnly ? " · auto-only" : ""}` +
+  if (process.env.SPECFLOW_CLI) data.cli = process.env.SPECFLOW_CLI;
+  const body = `<!-- worker ${JSON.stringify(data)} -->\n**${id}**${data.cli ? ` · ${data.cli}` : ""} · lane \`${data.lane}\`${data.autoOnly ? " · auto-only" : ""}` +
     `${data.step ? ` · now: ${data.step}` : ""} · last finished: ${data.done ?? "nothing yet"}${data.done && data.failed === data.done ? " (failed)" : ""}`;
   if (!DRY) upsertComment(reg, comments, mine, body, "worker", data);
   return data;
@@ -551,10 +567,10 @@ function setupBoard(reg) {
 // ---------- orchestrator: tick ----------
 
 // The next unit for one idle worker: finish your own PRs first, then review (PRs never pile up),
-// then new work in your lane, then any lane. GitHub forbids approving your own PR, so a worker
-// never reviews a PR opened by its own login (which covers two workers on one machine).
+// then new work in your lane, then any lane. Nobody reviews a PR its own worker opened. GitHub forbids approving
+// your own PR, so while workers on another account are live, reviews go across accounts (see the top of this file).
 // Nobody gets a unit they already failed, and a PR whose author's worker is gone (or failed the fix) can be fixed by anyone.
-function pick(w, { issues, prs, busy, failures, alive }, ownLaneOnly) {
+function pick(w, { issues, prs, busy, failures, alive, logins }, ownLaneOnly) {
   const failed = (action, n) => (failures[`${action}#${n}`] ?? []).includes(w.id);
   const lane = w.lane && w.lane !== "any" ? `area:${w.lane}` : null;
   const inLane = (labels) => !ownLaneOnly || !lane || labels.includes(lane);
@@ -568,7 +584,7 @@ function pick(w, { issues, prs, busy, failures, alive }, ownLaneOnly) {
 
   const review = prs
     .filter((p) => !busy.has(`pr#${p.number}`) && !failed("review", p.number) && !p.isDraft &&
-      p.labels.includes("pr:needs-review") && p.author !== w.login)
+      p.labels.includes("pr:needs-review") && p.worker !== w.id && (logins.size < 2 || p.author !== w.login))
     .sort((a, b) => a.number - b.number)[0];
   if (review) return { action: "review", pr: review.number, role: "reviewer", round: review.rounds };
 
@@ -729,7 +745,9 @@ function tick() {
 
   // 3. Give every live, idle worker its next unit. Two passes, so every worker gets work from its own
   // lane before anyone helps out in another lane. Within a pass, longest-idle workers choose first.
-  const ctx = { issues, prs, busy, failures, alive };
+  // The GitHub accounts with a live worker: two or more means reviews go across accounts.
+  const logins = new Set([...workers.values()].filter((w) => now - w.seen < LIVE_MS).map((w) => w.login));
+  const ctx = { issues, prs, busy, failures, alive, logins };
   const idle = [...workers.values()]
     .filter((w) => !units[w.id] && now - w.seen < LIVE_MS)
     .sort((a, b) => a.seen - b.seen || a.id.localeCompare(b.id));
@@ -903,23 +921,199 @@ function beat() {
   log("beat: ok");
 }
 
+// A worktree for one more worker: ../<repo>-<name>, detached at main, with this folder's .env copied in.
+// Returns its path; an existing one is reused as it is.
+function makeWorktree(name) {
+  const top = MAIN_CHECKOUT();
+  const dir = resolve(top, "..", `${basename(top)}-${name}`);
+  if (existsSync(dir)) return dir;
+  const loud = (a) => execFileSync("git", a, { stdio: ["ignore", "inherit", "inherit"] });
+  loud(["fetch", "--quiet", BASE()]);
+  loud(["worktree", "add", "--detach", dir, MAIN()]);
+  if (existsSync(join(top, ".env"))) copyFileSync(join(top, ".env"), join(dir, ".env"));
+  return dir;
+}
+
+// The main checkout (not a worktree): where the orchestrator runs and the team's worktrees hang off.
+const MAIN_CHECKOUT = () => resolve(git(["rev-parse", "--path-format=absolute", "--git-common-dir"]), "..");
+
 function worktree() {
   const name = positional[1];
   if (!name) usage("worktree <name>");
-  const dir = resolve("..", `${basename(process.cwd())}-${name}`);
-  const loud = (a) => execFileSync("git", a, { stdio: "inherit" });
-  loud(["fetch", BASE()]);
-  loud(["worktree", "add", "--detach", dir, MAIN()]);
+  const dir = makeWorktree(name);
   log(`\nWorker folder ready: ${dir}
-Next:
-  1. Copy your .env into it, if you have one.
-  2. Open it as its own window: code "${dir}"   (or start Copilot CLI in it)
-  3. Install the project's dependencies there (the Install command in AGENTS.md).
-  4. Start the worker: /work <lane>   Its id will be ${me()}/${basename(dir)}`);
+Next, in a new tmux window there:
+  claude --agent worker "/work <lane>"     (or: copilot --agent worker -i "Start the worker loop. My lane is <lane>.")
+Its id will be ${me()}/${basename(dir)}. \`team up\` / \`team add\` do all of this for you.`);
+}
+
+// ---------- team: one machine, tmux ----------
+// One session per repo. Window `orch` runs the orchestrator agent in the main checkout, `board` refreshes
+// `status`, and each worker gets a window and a worktree named <cli>-<n>. The agent CLIs pick up the kit from
+// .claude/ (agents, skills, commands) and CLAUDE.md / AGENTS.md; Claude Code reads its permissions from
+// .claude/settings.json, and Copilot CLI gets the same list as --allow-tool / --deny-tool flags.
+
+const CLIS = ["claude", "copilot"];
+
+// KEY=VALUE lines from the main checkout's .env, under the real environment (which wins).
+function dotenv() {
+  const env = {};
+  const file = join(MAIN_CHECKOUT(), ".env");
+  if (existsSync(file))
+    for (const line of readFileSync(file, "utf8").split(/\r?\n/)) {
+      const m = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*?)\s*$/);
+      if (m) env[m[1]] = m[2].replace(/^(["'])(.*)\1$/, "$2");
+    }
+  return { ...env, ...process.env };
+}
+const expandHome = (p) => (p?.startsWith("~/") ? join(process.env.HOME ?? "", p.slice(2)) : p);
+
+// The environment of one agent window: which CLI it is, and (optionally) which GitHub account it runs as.
+function agentEnv(cli) {
+  const env = dotenv();
+  const out = { SPECFLOW_CLI: cli };
+  const ghDir = expandHome(env[`SPECFLOW_GH_CONFIG_${cli.toUpperCase()}`]);
+  if (ghDir) out.GH_CONFIG_DIR = ghDir;
+  return out;
+}
+
+// Claude Code's permission rules, as Copilot CLI flags: Bash(x:*) -> shell(x:*), Edit/Write -> write.
+// Copilot matches a command by its name (git and gh: name + subcommand), so an allow rule with
+// arguments, like `node scripts/orchestrate.mjs:*`, becomes `node:*`.
+function copilotPermissionFlags() {
+  let perms = {};
+  try {
+    perms = JSON.parse(readFileSync(join(MAIN_CHECKOUT(), ".claude", "settings.json"), "utf8")).permissions ?? {};
+  } catch {}
+  const map = (rule, key) => {
+    const m = rule.match(/^Bash\((.+)\)$/);
+    const words = m?.[1].replace(/:\*$/, "").split(" ");
+    if (m && key === "allow" && words.length > 1 && !["git", "gh"].includes(words[0])) return `shell(${words[0]}:*)`;
+    if (m) return `shell(${m[1]})`;
+    return /^(Edit|Write|MultiEdit)\b/.test(rule) ? "write" : null;
+  };
+  const flags = [];
+  for (const [key, flagName] of [["allow", "--allow-tool"], ["deny", "--deny-tool"]])
+    for (const rule of perms[key] ?? []) {
+      const tool = map(rule, key);
+      if (tool && !flags.includes(`${flagName}=${tool}`)) flags.push(`${flagName}=${tool}`);
+    }
+  return flags;
+}
+
+// The command line that starts an agent CLI with a custom agent and a first prompt.
+function agentCommand(cli, agent, prompt) {
+  const env = dotenv();
+  const model = env[`SPECFLOW_MODEL_${cli.toUpperCase()}`];
+  const argv = cli === "claude"
+    ? ["claude", "--agent", agent, ...(model ? ["--model", model] : []), prompt]
+    : ["copilot", "--agent", agent, ...(model ? ["--model", model] : []), ...copilotPermissionFlags(),
+      // The built-in GitHub MCP server acts as Copilot's own sign-in: only use it when this window's gh does too.
+      ...(agentEnv(cli).GH_CONFIG_DIR ? ["--disable-mcp-server", "github-mcp-server"]
+        : ["--enable-all-github-mcp-tools", "--allow-tool=github-mcp-server"]), "-i", prompt];
+  return argv.map(shq).join(" ");
+}
+const shq = (s) => (/^[\w@%+=:,./-]+$/.test(s) ? s : `'${s.replace(/'/g, "'\\''")}'`);
+
+const tmux = (a, opts = {}) => execFileSync("tmux", a, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], ...opts }).trim();
+const sessionName = () => `specflow-${basename(MAIN_CHECKOUT())}`.replace(/[.:]/g, "-");
+const hasSession = (s) => spawnSync("tmux", ["has-session", "-t", `=${s}`], { stdio: "ignore" }).status === 0;
+const windowNames = (s) => (hasSession(s) ? tmux(["list-windows", "-t", `=${s}`, "-F", "#{window_name}"]).split("\n").filter(Boolean) : []);
+
+// A window running `command` in a login shell, so it stays open (and can be re-run with the up arrow) when the CLI exits.
+function openWindow(s, name, dir, env, command) {
+  const envArgs = Object.entries(env).flatMap(([k, v]) => ["-e", `${k}=${v}`]);
+  if (hasSession(s)) tmux(["new-window", "-d", "-t", `=${s}:`, "-n", name, "-c", dir, ...envArgs]);
+  else tmux(["new-session", "-d", "-s", s, "-n", name, "-c", dir, ...envArgs]);
+  tmux(["send-keys", "-t", `=${s}:${name}`, command, "Enter"]);
+}
+
+// Fail before creating anything: tmux, gh (for every account in use) and each CLI must be there.
+function preflight(clis) {
+  const missing = [];
+  const runs = (bin, a, env) => spawnSync(bin, a, { stdio: "ignore", env: { ...process.env, ...env } }).status === 0;
+  if (!runs("tmux", ["-V"])) missing.push("tmux: install it (apt install tmux, brew install tmux)");
+  for (const cli of clis) {
+    if (!runs(cli, ["--version"]))
+      missing.push(cli === "claude" ? "claude: npm install -g @anthropic-ai/claude-code, then run `claude` once to sign in"
+        : "copilot: npm install -g @github/copilot, then run `copilot` once to sign in");
+    const env = agentEnv(cli);
+    if (!runs("gh", ["auth", "status"], env))
+      missing.push(`gh is not signed in${env.GH_CONFIG_DIR ? ` for ${cli} (GH_CONFIG_DIR=${env.GH_CONFIG_DIR}): GH_CONFIG_DIR=${env.GH_CONFIG_DIR} gh auth login` : ": gh auth login"}`);
+  }
+  if (missing.length) fail(`can't start the team:\n  ${missing.join("\n  ")}`);
+}
+
+function workerWindow(s, cli, n, lane, autoOnly) {
+  const name = `${cli}-${n}`;
+  const dir = makeWorktree(name);
+  const prompt = `Start the worker loop (the worker agent's instructions). My lane is ${lane}.` +
+    (autoOnly ? " Auto-only: add --auto-only to every orchestrate.mjs work call." : "") +
+    " Keep looping, and don't stop to ask me anything.";
+  openWindow(s, name, dir, agentEnv(cli), agentCommand(cli, "worker", prompt));
+  return `${name} (${lane}) in ${dir}`;
+}
+
+const nextIndex = (names, cli) => 1 + Math.max(0, ...names.map((w) => w.match(new RegExp(`^${cli}-(\\d+)$`))?.[1]).filter(Boolean).map(Number));
+
+function team() {
+  const sub = positional[1] ?? "status";
+  const s = sessionName();
+  const top = MAIN_CHECKOUT();
+  if (sub === "up") {
+    const counts = Object.fromEntries(CLIS.map((c) => [c, Number(opt(c, 0))]));
+    if (!counts.claude && !counts.copilot) counts.claude = 1, counts.copilot = 1;
+    const orch = opt("orchestrator", "claude");
+    if (!CLIS.includes(orch)) usage("team up --orchestrator <claude|copilot>");
+    const lanes = opt("lanes", "frontend,backend").split(",").filter(Boolean);
+    if (lanes.some((l) => !LANES.includes(l))) usage(`team up --lanes <${LANES.join(",")}>`);
+    preflight([...new Set([orch, ...CLIS.filter((c) => counts[c])])]);
+    const have = new Set(windowNames(s));
+    const made = [];
+    if (!have.has("orch")) {
+      openWindow(s, "orch", top, agentEnv(orch), agentCommand(orch, "orchestrator",
+        "Start orchestrating: run the Start steps, then the loop, as your instructions describe. Keep looping until I say stop."));
+      made.push(`orch (${orch}) in ${top}`);
+    }
+    if (!have.has("board")) {
+      openWindow(s, "board", top, {}, "node scripts/orchestrate.mjs status --every 30");
+      made.push("board");
+    }
+    // Lanes alternate over all the workers, so a mix of CLIs covers both lanes.
+    let k = 0;
+    for (const cli of CLIS)
+      for (let n = 1; n <= counts[cli]; n++, k++)
+        if (!have.has(`${cli}-${n}`)) made.push(workerWindow(s, cli, n, lanes[k % lanes.length], flag("auto-only")));
+    log(made.length ? `started:\n  ${made.join("\n  ")}` : "nothing to start: every window is already running");
+    log(`\nattach: tmux attach -t ${s}    (switch windows: Ctrl-b w, detach: Ctrl-b d)`);
+    return;
+  }
+  if (sub === "add") {
+    const cli = positional[2];
+    if (!CLIS.includes(cli)) usage("team add <claude|copilot> [--lane <area>] [--auto-only]");
+    const lane = opt("lane", "any");
+    if (!LANES.includes(lane)) usage(`team add ${cli} --lane <${LANES.join("|")}>`);
+    preflight([cli]);
+    log(`started: ${workerWindow(s, cli, nextIndex(windowNames(s), cli), lane, flag("auto-only"))}`);
+    return;
+  }
+  if (sub === "status") {
+    if (!hasSession(s)) return console.log(`no session ${s}: start it with \`node scripts/orchestrate.mjs team up\``);
+    console.log(`session ${s}  (tmux attach -t ${s})`);
+    console.log(tmux(["list-windows", "-t", `=${s}`, "-F", "  #{window_index}: #{window_name}\t#{pane_current_command}\t#{pane_current_path}"]));
+    return;
+  }
+  if (sub === "down") {
+    if (!hasSession(s)) return log(`no session ${s}`);
+    tmux(["kill-session", "-t", `=${s}`]);
+    log(`stopped ${s}. Worktrees, branches and stashes are kept; assignments come back on \`team up\`.`);
+    return;
+  }
+  usage("team <up|add|status|down>");
 }
 
 // ---------- specialist: start / pr / park ----------
-// The fixed git steps of a unit, so agents don't hand-run 5-10 shell commands per unit (one at a time, on Windows).
+// The fixed git steps of a unit, so agents don't hand-run 5-10 git and gh commands per unit.
 
 const slug = (title) => title.toLowerCase().replace(/^\[[^\]]*\]\s*/, "").replace(/[^a-z0-9]+/g, "-")
   .replace(/^-+/, "").slice(0, 40).replace(/-+$/, "") || "work";
@@ -1093,7 +1287,7 @@ function needsInstall() {
   return true;
 }
 
-// Through the shell, so the table's commands run as typed (CMD on Windows, which also finds npm.cmd and mvnw.cmd).
+// Through /bin/sh, so the table's commands run as typed.
 function runStep(command) {
   const r = spawnSync(command, { cwd: root(), shell: true, encoding: "utf8", maxBuffer: 512 * 1024 * 1024, timeout: 30 * 60_000 });
   const out = `${r.stdout ?? ""}${r.stderr ?? ""}`.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "");
@@ -1193,20 +1387,23 @@ function reviewed() {
   if (flag("changes")) {
     // One send-back per PR. After that, open items are settled in the PR conversation, or fixed by the
     // reviewer. Build and tests are never waived: a PR the reviewer can't make green goes to pr:needs-human.
-    const rounds = ghJson(["pr", "view", pr, "--json", "reviews"]).reviews.filter((r) => r.state === "CHANGES_REQUESTED").length;
-    if (rounds >= 1) {
+    const { reviews, author } = ghJson(["pr", "view", pr, "--json", "reviews,author"]);
+    if (sendBacks(reviews) >= 1) {
       console.error(`#${pr} was already sent back once, and it can't be sent back again. Settle open items in the PR conversation, ` +
         "make the build and tests green yourself and merge, or add the pr:needs-human label (see the review-pr skill, 4b).");
       process.exit(2);
     }
-    write(`request changes on #${pr}`, ["pr", "review", pr, "--request-changes", "--body-file", bodyFile]);
+    if (author.login === me())
+      write(`send #${pr} back (comment review: same account as its author)`, ["pr", "review", pr, "--comment", "--body-file", "-"],
+        `${readFileSync(bodyFile, "utf8").trimEnd()}\n\n${CHANGES_MARK}`);
+    else write(`request changes on #${pr}`, ["pr", "review", pr, "--request-changes", "--body-file", bodyFile]);
     write(`  hand #${pr} back to its author`, ["pr", "edit", pr, "--add-label", "pr:changes", "--remove-label", "pr:reviewing,pr:needs-review"]);
     return;
   }
   // Merge only what was checked: this PR head, on top of this main. If either moved, check again first.
   const rv = readState(`review-${pr}.json`);
   const ck = readState("check.json");
-  const info = ghJson(["pr", "view", pr, "--json", "title,headRefOid"]);
+  const info = ghJson(["pr", "view", pr, "--json", "title,headRefOid,author"]);
   const spec = isSpecPR(info);
   if (!rv || rv.conflict) fail(`run \`review-start ${pr}\` first: a merge needs the PR checked on top of main.`);
   if (!ck?.ok || ck.head !== rv.head || ck.dirty || !(ck.mode === "full" || (spec && ck.mode === "spec")))
@@ -1214,13 +1411,30 @@ function reviewed() {
   if (info.headRefOid !== rv.prHead) fail(`#${pr} has new commits since review-start: run \`review-start ${pr}\` and \`check\` again.`, 4);
   const mainNow = git(["ls-remote", BASE(), "refs/heads/main"]).split(/\s+/)[0];
   if (mainNow !== rv.main) fail(`main moved since review-start (another PR merged): run \`review-start ${pr}\` and \`check\` again, so what merges is what you tested.`, 4);
-  write(`approve #${pr}`, ["pr", "review", pr, "--approve", "--body-file", bodyFile]);
+  if (info.author.login === me())
+    write(`review #${pr} (comment review: same account as its author)`, ["pr", "review", pr, "--comment", "--body-file", bodyFile]);
+  else write(`approve #${pr}`, ["pr", "review", pr, "--approve", "--body-file", bodyFile]);
   write(`merge #${pr}`, ["pr", "merge", pr, "--squash", "--delete-branch", "--match-head-commit", rv.prHead]);
 }
 
 // ---------- status / setup / take ----------
 
 function status() {
+  const every = Number(opt("every", 0));
+  if (!every) return statusOnce();
+  for (;;) {
+    console.clear();
+    console.log(`${new Date().toLocaleTimeString()} · every ${every}s · Ctrl-c to stop\n`);
+    try {
+      statusOnce();
+    } catch (e) {
+      console.log(`status failed: ${errDetail(e)}`);
+    }
+    sleep(every);
+  }
+}
+
+function statusOnce() {
   const issues = loadIssues();
   const open = issues.filter((i) => i.state === "OPEN");
   const row = (i) => `  #${i.number} ${i.title}${i.assignees.length ? `  (${i.assignees.join(", ")})` : ""}`;
@@ -1246,7 +1460,7 @@ function status() {
   for (const c of comments.filter((c) => c.kind === "worker")) {
     const u = asg.units[c.data.id];
     const state = u && u.key !== c.data.done ? `${u.action} #${u.issue ?? u.pr}` : "idle";
-    console.log(`  ${c.data.id}  lane ${c.data.lane}  ${state}${c.data.step && state !== "idle" ? ` (${c.data.step})` : ""}  (seen ${minutes(Date.now() - c.updated)} min ago)`);
+    console.log(`  ${c.data.id}  ${c.data.cli ?? "-"}  lane ${c.data.lane}  ${state}${c.data.step && state !== "idle" ? ` (${c.data.step})` : ""}  (seen ${minutes(Date.now() - c.updated)} min ago)`);
   }
 }
 
@@ -1310,7 +1524,7 @@ function take() {
 // ---------- main ----------
 
 const commands = {
-  setup, take, status, reviewed, worktree, done, beat, start, rebase, check, park,
+  setup, take, status, reviewed, worktree, team, done, beat, start, rebase, check, park,
   pr: openPr,
   "review-start": reviewStart,
   tick: tickCommand,
