@@ -1,5 +1,4 @@
-# Keep LF on every OS. Git for Windows defaults to core.autocrlf=true, which would
-# otherwise give teammates CRLF files and noisy diffs.
+# Keep LF everywhere, whatever core.autocrlf says.
 * text=auto eol=lf
 *.png binary
 *.jpg binary

@@ -8,7 +8,8 @@ githubCopilot:
 # Keep it to about one page. API contracts do NOT go here: they live in each change's
 # design.md and specs/, and in openspec/specs/ once archived.
 context: |
-  Time-boxed project: 6 people, each running a Copilot agent in VS Code, working in parallel.
+  Time-boxed project: one machine runs an orchestrator and several worker agents (Claude Code and
+  GitHub Copilot CLI, each in its own git worktree and tmux window), working in parallel.
   Optimize for a working demo and for avoiding merge conflicts.
 
   Problem: <who has what problem, in one or two sentences>

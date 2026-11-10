@@ -8,3 +8,4 @@ build/
 __pycache__/
 .DS_Store
 .orchestrate/
+.claude/settings.local.json

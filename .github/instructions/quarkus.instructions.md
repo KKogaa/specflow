@@ -7,9 +7,9 @@ description: Quarkus backend coding standards, used when the backend is Java + Q
 
 Use these only if `## Project` in `AGENTS.md` says the backend is Java + Quarkus. Stack: Quarkus 3 with Maven, Quarkus REST + Jackson, Hibernate Validator, Hibernate ORM with Panache, Flyway, SmallRye OpenAPI and Fault Tolerance, JUnit 5 with RestAssured. Use the versions `scaffold` put in `pom.xml`.
 
-## Commands on Windows
+## Commands
 
-- Run Maven through the wrapper, wrapped in the root `package.json` scripts the Commands table uses (e.g. `"test:api": "cd api && mvnw.cmd test"`). npm runs scripts in CMD on Windows, so they behave the same whichever shell the worker uses. Never call `./mvnw` directly in a command a skill runs.
+- Run Maven through the wrapper (`./mvnw`), wrapped in the root `package.json` scripts the Commands table uses (e.g. `"test:api": "cd api && ./mvnw -q test"`), so every row of the table is one short command.
 - Dev Services start databases in Docker. If a machine has no Docker, `%dev` and `%test` profiles use a hosted database or H2, set in `application.properties`, so `check` still passes.
 
 ## Architecture in Quarkus
